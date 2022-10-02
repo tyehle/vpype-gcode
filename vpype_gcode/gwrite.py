@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import copy
 import sys
+from types import ModuleType
 import typing
 from pathlib import Path
 
@@ -52,6 +53,15 @@ def invert_axis(
     document.translate(origin[0], origin[1])
 
     return document
+
+
+def load_python_config_module(module_path: str | None) -> ModuleType | None:
+    import importlib
+    if module_path is None:
+        return None
+    path = Path(module_path)
+    sys.path.append(str(path.parent))
+    return importlib.import_module(path.stem)
 
 
 @click.command()
@@ -107,23 +117,31 @@ def gwrite(
 
     # Read the config for the profile from the main vpype
     config = gwrite_config[profile]
-    document_start = config.get("document_start", None)
-    document_end = config.get("document_end", None)
-    layer_start = config.get("layer_start", None)
-    layer_end = config.get("layer_end", None)
-    layer_join = config.get("layer_join", None)
-    line_start = config.get("line_start", None)
-    line_end = config.get("line_end", None)
-    line_join = config.get("line_join", None)
-    segment_first = config.get("segment_first", None)
-    segment = config.get("segment", None)
-    segment_last = config.get("segment_last", None)
-    unit = config.get("unit", "mm")
 
-    offset_x = config.get("offset_x", 0.0)
-    offset_y = config.get("offset_y", 0.0)
-    scale_x = config.get("scale_x", 1.0)
-    scale_y = config.get("scale_y", 1.0)
+    python_config = load_python_config_module(config.get("python_config", None))
+    def get_config(name: str, default: typing.Any) -> typing.Any:
+        if name in config:
+            return config[name]
+        return getattr(python_config, name, default)
+
+    document_start = get_config("document_start", None)
+    document_end = get_config("document_end", None)
+    layer_start = get_config("layer_start", None)
+    layer_end = get_config("layer_end", None)
+    layer_join = get_config("layer_join", None)
+    line_start = get_config("line_start", None)
+    line_end = get_config("line_end", None)
+    line_join = get_config("line_join", None)
+    segment_first = get_config("segment_first", None)
+    segment = get_config("segment", None)
+    segment_last = get_config("segment_last", None)
+    unit = get_config("unit", "mm")
+    default_values = get_config("default_values", dict())
+
+    offset_x = get_config("offset_x", 0.0)
+    offset_y = get_config("offset_y", 0.0)
+    scale_x = get_config("scale_x", 1.0)
+    scale_y = get_config("scale_y", 1.0)
 
     # transform the document according to the desired parameters
     orig_document = document
@@ -132,10 +150,10 @@ def gwrite(
     document.scale(scale_x / unit_scale, scale_y / unit_scale)
     document.translate(offset_x, offset_y)
 
-    invert_x = config.get("invert_x", False)
-    invert_y = config.get("invert_y", False)
-    flip_x = config.get("horizontal_flip", False)
-    flip_y = config.get("vertical_flip", False)
+    invert_x = get_config("invert_x", False)
+    invert_y = get_config("invert_y", False)
+    flip_x = get_config("horizontal_flip", False)
+    flip_y = get_config("vertical_flip", False)
     # transform the document according to inversion parameters
     if invert_x or invert_y:
         document = invert_axis(document, invert_x, invert_y)
@@ -145,23 +163,28 @@ def gwrite(
     # prepare
     current_layer: vp.LineCollection | None = None
 
-    def write_template(template: str | None, **context_vars: typing.Any):
-        """Expend a user-provided template using `format()`-style substitution."""
+    def write_template(template: str | typing.Callable[..., str] | None, **context_vars: typing.Any):
+        """Expand a user-provided template using `format()`-style substitution."""
         if template is None:
             return
         dicts = [context_vars, document.metadata]
         if current_layer is not None:
             dicts.append(current_layer.metadata)
         dicts.append(dict(default))
-        if "default_values" in config:
-            dicts.append(config["default_values"])
+        dicts.append(default_values)
+        params = collections.ChainMap(*dicts)
 
-        try:
-            output.write(template.format_map(collections.ChainMap(*dicts)))
-        except KeyError as exc:
-            raise click.BadParameter(
-                f"key {exc.args[0]!r} not found in context variables or properties"
-            )
+        if callable(template):
+            output.write(template(**params))
+        elif isinstance(template, str):
+            try:
+                output.write(template.format_map(params))
+            except KeyError as exc:
+                raise click.BadParameter(
+                    f"key {exc.args[0]!r} not found in context variables or properties"
+                )
+        else:
+            raise RuntimeError(f"Unexpected template type: {type(template)}: {template}")
 
     # process file
     filename = output.name
@@ -317,7 +340,7 @@ def gwrite(
     write_template(document_end, filename=filename)
 
     # handle info string
-    info = config.get("info", None)
+    info = get_config("info", None)
     if info:
         print(info, file=sys.stderr)
 
